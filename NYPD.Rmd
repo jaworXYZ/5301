@@ -1,0 +1,136 @@
+---
+title: "NYPD Shooting Incident Data"
+author: "L.J."
+date: "9/21/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Step 1: Start an Rmd Document
+
+Libary Calls:
+```{r Library, warning=FALSE,message=FALSE}
+library(tidyverse)
+library(lubridate)
+```
+
+Read "NYPD Shooting Incident Data (Historic)". This data includes every shooting incident from 2006-2020 (at the time of this analysis). The dataset includes dates, times, locations, and demographics of both the victims and perpetrators.
+```{r load, warning=FALSE,message=FALSE}
+url <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+data <- read_csv(url)
+```
+
+## Step 2: Tidy and Transform Your Data
+
+Check data and data types
+```{r}
+summary(data)
+spec(data)
+```
+
+Tidy data by setting data to appropriate types. Most columns converted to factors, OCCUR_DATE is converted to dates, and Lon_Lat is being discarded as it is redundanct. The tidied data is stored as "df".
+```{r}
+df <- data %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  mutate(across(BORO, as.factor)) %>% 
+  mutate(across(PRECINCT, as.factor)) %>% 
+  mutate(across(JURISDICTION_CODE, as.factor)) %>% 
+  mutate(across(LOCATION_DESC, as.factor)) %>% 
+  mutate(across(PERP_AGE_GROUP, as.factor)) %>% 
+  mutate(across(PERP_SEX, as.factor)) %>%  
+  mutate(across(PERP_RACE, as.factor)) %>% 
+  mutate(across(VIC_AGE_GROUP, as.factor)) %>% 
+  mutate(across(VIC_SEX, as.factor)) %>% 
+  mutate(across(VIC_RACE, as.factor)) %>%
+  select(-c(Lon_Lat))
+```
+
+
+## Step 3: Add Visualizations and Analysis
+
+### A: Investigation of geographic date (by coordinates)
+
+I want to get a look at where the shooting crimes occurred, and may as well include a class for the markers. In this case, race may be interesting.
+```{r}
+select(df,c(X_COORD_CD,Y_COORD_CD,VIC_RACE)) %>%
+  ggplot(aes(x=X_COORD_CD, y=Y_COORD_CD, color=VIC_RACE)) +
+  geom_point()
+```
+
+We can compare this to a map of the NYPD precincts to better understand what we're looking at:
+![NYPD Precincts](https://www.nydailynews.com/resizer/1IhhJiSQuov2dbCwMPV11jw8GKA=/800x817/top/arc-anglerfish-arc2-prod-tronc.s3.amazonaws.com/public/7WL3YWWXJA7AECHK5GROAFW7XA.jpg)
+
+It appears from this visualization that the vast majority of victims were identified as black, and it's only towards the southwest that we start to see a greater proportion of white victims.
+
+
+### B: Investigation of annual data
+
+I want to get a look how the shooting incidentc fluctuate over the year. To do so we will group the data by week of the year and plot the average number of incidents.
+```{r}
+df_weekly <- df %>%
+  group_by(Week_of_year = week(OCCUR_DATE)) %>%
+  summarise(Incidents_2006_2020 = n()/(2020-2006))
+
+ggplot(df_weekly,aes(x=Week_of_year, y=Incidents_2006_2020)) +
+  geom_point()
+```
+
+The plot shows a strong peak towards the middle of the year (summer), with  a lowest averages roughly in February. We can see that there is data for a 53rd week, representing the last day or two of the year. 
+
+I'd like to model this data, and think that removing this 53rd week, should give us a better model. Given the shape of the data and the cyclic nature of what we're modeling (week 52 and week 1 should maintain a continuous curve) , a straight-line model would be inappropriate, so we will try a cubic model first.
+```{r}
+df_weekly <- df_weekly[1:52,]
+
+weekmod3 <- lm(Incidents_2006_2020 ~ poly(Week_of_year,3), df_weekly)
+summary(weekmod3)
+df_weekly %>% mutate(pred=predict(weekmod3)) %>% ggplot() +
+  geom_point(aes(x=Week_of_year,y=Incidents_2006_2020)) +
+  geom_line(aes(x=Week_of_year,y=pred), color="red") +
+  ggtitle("Average Weekly Shooting Incidents Per Week of Year",
+          subtitle = "Cubic Fit")
+```
+
+Visually, the model doesn't look like a good fit; the initial curve isn't steep enough, the middle peak is not reached, and the later curve appears too steep. Looking at the summary, our R-squared value is roughly 0.6, indicated we don't have a great fit.
+
+Let's try a higher-degree polynomial (n=5) to see if we can improve the fit.
+```{r}
+weekmod5 <- lm(Incidents_2006_2020 ~ poly(Week_of_year,5), df_weekly)
+summary(weekmod5)
+df_weekly %>% mutate(pred=predict(weekmod5)) %>% ggplot() +
+  geom_point(aes(x=Week_of_year,y=Incidents_2006_2020)) +
+  geom_line(aes(x=Week_of_year,y=pred), color="red") +
+  ggtitle("Average Weekly Shooting Incidents Per Week of Year",
+          subtitle = "n=5 Poly Fit")
+```
+
+This model is a much better fit, with an R-value approaching 0.9. However, with such a high degree polynomial, it's very possible we're overfitting the data. Further, when we consider Week 52 being followed by the next year's Week 1, we can see a disconituity and that we haven't established a pattern.
+
+A sinusoidal model should give us something more cyclical and one that may fit our data very well.
+```{r}
+xc<-cos(2*pi*df_weekly$Week_of_year/52)
+xs<-sin(2*pi*df_weekly$Week_of_year/52)
+#fit.lm <- lm(temperature~xc+xs)
+weekmod_sin <- lm(Incidents_2006_2020 ~ xc+xs, df_weekly)
+summary(weekmod_sin)
+df_weekly %>% mutate(pred=predict(weekmod_sin)) %>% ggplot() +
+  geom_point(aes(x=Week_of_year,y=Incidents_2006_2020)) +
+  geom_line(aes(x=Week_of_year,y=pred), color="red") +
+  ggtitle("Average Weekly Shooting Incidents Per Week of Year",
+          subtitle = "Sinusoidal Fit")
+```
+
+This final model is definitely a big improvement over the first two. While the R-Value is lower, at 0.8 is still proves a reasonable match. 
+
+The model does seem like somewhat of an over-simplification though. A proper time-series analysis could hopefully give us something more meaningful (though that would be outside the scope of this assignment).
+
+
+## Step 4: Add Bias Identification
+
+In my first visualizations, although I didn't have any geographic preconceptions, I was struck by the apparent over-representation of black victims in the plot. Had I pursued that line of investigation further, I would have looked to better represent that as a dot plot could have introduced bias when drawing one class over another. It would have made sense to look at racial proportions per precinct and to compare it with external demographic date not included in this dataset.
+
+When approaching the seasonal investigation, I did come in with some biases. I expected summer incidents to skew higher than winter and although this was born out in the visualization, the peaks came later in the year than expected. In my analysis I didn't look at the years on an individual basis, and doing so could highlight if there were any extreme periods of time that could skew the data. A proper time-series analysis would probably be in order.
