@@ -1,0 +1,141 @@
+---
+title: "COVID-5301"
+author: "L.J."
+date: "10/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# John Hopkins COVID-19 Data Assignment
+
+Library Calls:
+```{r Library, warning=FALSE,message=FALSE}
+library(tidyverse)
+library(lubridate)
+```
+
+Read Global COVID-19 datasets assembled by Johns Hopkins. These datasets are updated daily, and include countries, sub-regions within those countries, lat/lon coordinates and cumulative counts for confirmed cases, deaths, and recoveries.
+```{r load, warning=FALSE,message=FALSE}
+urls <- c("https://github.com/CSSEGISandData/COVID-19/raw/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv",
+          "https://github.com/CSSEGISandData/COVID-19/raw/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv",
+          "https://github.com/CSSEGISandData/COVID-19/raw/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_recovered_global.csv")
+g_confirmed <- read_csv(urls[1])
+g_deaths <- read_csv(urls[2])
+g_recovered <- read_csv(urls[3])
+```
+
+### Tidy Data
+Limit to Canada-specific data; Limit to September 30, 2021 for reproducibility
+```{r Canada}
+
+# Include Canada only data to September 30, 2021 (@column 622)
+final_date_row = 622
+
+can_confirmed <- g_confirmed %>%
+  filter(`Country/Region`=='Canada') %>%
+  select(1|5:all_of(final_date_row)) %>%
+  pivot_longer(cols = -c(`Province/State`),
+               names_to = "Date",
+               values_to = "Confirmed")
+
+can_deaths <- g_deaths %>%
+  filter(`Country/Region`=='Canada') %>%
+  select(1|5:all_of(final_date_row)) %>%
+  pivot_longer(cols = -c(`Province/State`),
+               names_to = "Date",
+               values_to = "Deaths")
+
+# Join sets
+cancov = full_join(can_confirmed, can_deaths)
+
+# Tidy variables
+cancov <- cancov %>%
+  rename(Prov = `Province/State`) %>% 
+  mutate(across(Prov, as.factor)) %>% 
+  mutate(Date = mdy(Date))
+
+# Remove travel values (Cruise Ships and Travellers)
+cancov <- cancov %>%
+  filter(!(Prov=="Diamond Princess"
+          |Prov=="Grand Princess"
+          |Prov=="Repatriated Travellers"))
+
+# Create a second dataset with total values across all provinces
+totcov <- cancov %>%
+  group_by(Date) %>%
+  summarize(Confirmed = sum(Confirmed), Deaths = sum(Deaths))
+```
+### Investigation
+
+I would like to see how we can link the number of confirmed cases to the number of deaths. Intuitively, a mortality rate of should predict a *final* number of deaths versus a *final* number of confirmed cases; however, we're looking at the data versus time, so we really need to think about Deaths(time = t) ~ Confirmed(time = t-t_delay). A linear plot would give us a y-intercept that could function as that delay.
+
+First I want to get a sense of how the confirmed cases have risen.
+
+```{r}
+cancov %>%
+  ggplot(aes(x=Date, y=Confirmed, fill=Prov)) + 
+  geom_area() + 
+  labs(title="Total Confirmed COVID-19 Cases in Canada")
+```
+
+I'd also like to take a look at the deaths.
+
+```{r}
+cancov %>%
+  ggplot(aes(x=Date, y=Deaths, fill=Prov)) + 
+  geom_area() + 
+  labs(title="Total Confirmed COVID-19 Deaths in Canada")
+```
+
+The two plots show some similarities in shape (an early plateau following by gentle arc), but we can see the proportions have changed somewhat (the death plateau is a greater relative to the death maximum than it is in the other chart). We can also see that some of the months, like Quebec, are more greatly represented here than in the first chart, which suggests the relationship between deaths, and confirmed cases may be somewhat inconsistent.
+
+We'll now plot the both variables on the same chart to get a sense for their magnitudes.
+```{r}
+totcov %>%
+  ggplot(aes(x=Date)) + geom_line(aes(y=Confirmed, color="Confirmed")) +   geom_line(aes(y=Deaths, color="Deaths"))
+```
+
+We can see that only a small percentage of cases result in death. At this scale, it's unclear what the relationship is though.
+
+To better see the relationship, we'll plot the Deaths vs Confirmed cases.
+```{r}
+totcov %>%
+  ggplot(aes(x=Confirmed, y=Deaths)) + geom_line()
+```
+Let's now try to model a linear fit.
+```{r}
+#df_weekly <- df_weekly[1:52,]
+
+mod <- lm(Deaths ~ Confirmed, totcov)
+summary(mod)
+totcov %>% mutate(pred=predict(mod)) %>% ggplot() +
+  geom_point(aes(x=Confirmed,y=Deaths)) +
+  geom_line(aes(x=Confirmed,y=pred), color="red") +
+  ggtitle("xxx",
+          subtitle = "Cubic Fit")
+```
+
+The fit above is good, but we can see that the initial trend in the data abruptly changes and flattens. It is unclear if this is due to a reduction in mortality rate, an increase in testing, and an increase in the positive rate of tests (no data for which is included in this set). Ultimately, the cause is outside the scope of this analysis. 
+
+
+The kink in our trendline should be addressed though, and to do so, we will cut off the first 200,000 confirmed cases and model just that later stages of the spread of the disease.
+```{r}
+mod2 <- lm(Deaths ~ Confirmed, filter(totcov,Confirmed>200000))
+summary(mod2)
+totcov %>% mutate(pred=predict(mod2,newdata=totcov)) %>% ggplot() +
+  geom_point(aes(x=Confirmed,y=Deaths)) +
+  geom_line(aes(x=Confirmed,y=pred), color="red") +
+  ggtitle("xxx",
+          subtitle = "Cubic Fit")
+```
+
+### CONCLUSION
+Here we get a much better fit. It appears that a linear model is appropriate to approximate the relationship between deaths and confirmed cases. In the model, we get a factor of 1.265e-2 which we can use as a mortality rate for future cases.
+
+### BIASES
+This model may not be appropriate for new outbreaks, and should only be used as a estimate on a national scale across provinces. The y-intercept is scaled to the population of Canada, and is wholly incorrect when applied to provinces. Normalizing the model may help.
+
+I assumed that the national data as an aggregate of the provinces would be sufficient as a basis for provinces, but looking at provincial data in the early stages suggested this might not be the case. Further testing would be required to see if the predicted mortality rate can be applied to the provinces.
